@@ -124,7 +124,7 @@ describe Imap::Sync do
     let(:second_message_id) { SecureRandom.hex }
     let(:second_body) { "<p>This is an <b>answer</b> to this message.</p>" }
 
-    it "continues from with new emails" do
+    it "continues with new emails" do
       provider = MockedImapProvider.any_instance
       provider.stubs(:open_mailbox).returns(uid_validity: 1)
 
@@ -229,6 +229,106 @@ describe Imap::Sync do
       expect(GroupArchivedMessage.where(topic_id: topic.id).exists?).to eq(true)
 
       expect(Topic.last.posts.where(post_type: Post.types[:regular]).count).to eq(2)
+    end
+  end
+
+  context "invaidated previous sync" do
+    let(:subject) { "Testing email post" }
+
+    let(:first_from) { "john@free.fr" }
+    let(:first_message_id) { SecureRandom.hex }
+    let(:first_body) { "This is the first message of this exchange." }
+
+    let(:second_from) { "sam@free.fr" }
+    let(:second_message_id) { SecureRandom.hex }
+    let(:second_body) { "<p>This is an <b>answer</b> to this message.</p>" }
+
+    it "is updated" do
+      provider = MockedImapProvider.any_instance
+
+      provider.stubs(:open_mailbox).returns(uid_validity: 1)
+      provider.stubs(:uids).with.returns([100, 200])
+      provider.stubs(:emails).with(anything, [100, 200], anything).returns(
+        [
+          {
+            "UID" => 100,
+            "LABELS" => %w[\\Inbox],
+            "FLAGS" => %i[Seen],
+            "RFC822" => EmailFabricator(
+              message_id: first_message_id,
+              from: first_from,
+              to: group.email_username,
+              cc: second_from,
+              subject: subject,
+              body: first_body
+            )
+          },
+          {
+            "UID" => 200,
+            "LABELS" => %w[\\Inbox],
+            "FLAGS" => %i[Recent],
+            "RFC822" => EmailFabricator(
+              message_id: second_message_id,
+              in_reply_to: first_message_id,
+              from: second_from,
+              to: group.email_username,
+              subject: "Re: #{subject}",
+              body: second_body
+            )
+          }
+        ]
+      )
+
+      expect { sync_handler.process(mailbox) }
+        .to change { Topic.count }.by(1)
+        .and change { Post.where(post_type: Post.types[:regular]).count }.by(2)
+        .and change { IncomingEmail.count }.by(2)
+
+      imap_data = Topic.last.incoming_email.pluck(:imap_uid_validity, :imap_uid)
+      expect(imap_data.first).to eq([1, 100])
+      expect(imap_data.second).to eq([1, 200])
+
+      provider.stubs(:open_mailbox).returns(uid_validity: 2)
+      provider.stubs(:uids).with.returns([111, 222])
+      provider.stubs(:emails).with(anything, [111, 222], anything).returns(
+        [
+          {
+            "UID" => 111,
+            "LABELS" => %w[\\Inbox],
+            "FLAGS" => %i[Seen],
+            "RFC822" => EmailFabricator(
+              message_id: first_message_id,
+              from: first_from,
+              to: group.email_username,
+              cc: second_from,
+              subject: subject,
+              body: first_body
+            )
+          },
+          {
+            "UID" => 222,
+            "LABELS" => %w[\\Inbox],
+            "FLAGS" => %i[Recent],
+            "RFC822" => EmailFabricator(
+              message_id: second_message_id,
+              in_reply_to: first_message_id,
+              from: second_from,
+              to: group.email_username,
+              subject: "Re: #{subject}",
+              body: second_body
+            )
+          }
+        ]
+      )
+
+      expect { sync_handler.process(mailbox) }
+        .to change { Topic.count }.by(0)
+        .and change { Post.where(post_type: Post.types[:regular]).count }.by(0)
+        .and change { IncomingEmail.count }.by(0)
+
+      imap_data = Topic.last.incoming_email.pluck(:imap_uid_validity, :imap_uid)
+      expect(imap_data.first).to eq([2, 111])
+      expect(imap_data.second).to eq([2, 222])
     end
   end
 end
